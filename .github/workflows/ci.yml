@@ -3,13 +3,11 @@ name: CI
 on:
   push:
   pull_request:
-  schedule:
-    # Nightly (UTC) fuzzing job gate kept separate
-    - cron: "0 2 * * *"
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
         build_type: [Release, Debug]
@@ -24,12 +22,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DAHSSSP_BUILD_TESTS=ON \
             -DAHSSSP_BUILD_SIMPLE=ON \
-<<<<<<< HEAD
-            -DAHSSSP_BUILD_FULL=OFF \
-            -DAHSSSP_BUILD_PYTHON=OFF
-=======
             -DAHSSSP_BUILD_FULL=OFF
->>>>>>> 5640aea (several changes related to building and testing procedures)
 
       - name: Build
         run: |
@@ -39,41 +32,8 @@ jobs:
         run: |
           ctest --test-dir build --output-on-failure
 
-<<<<<<< HEAD
-      - name: Python adversarial differential tests (fast)
-        run: |
-          python3 -V
-          # If your python tests live under python/ or tools/, adjust path accordingly.
-          python3 test_differential.py --mode=adversarial
-
-  nightly-fuzz:
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure (CMake, Release)
-        run: |
-          cmake -S . -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DAHSSSP_BUILD_TESTS=OFF \
-            -DAHSSSP_BUILD_SIMPLE=ON \
-            -DAHSSSP_BUILD_FULL=OFF \
-            -DAHSSSP_BUILD_PYTHON=OFF
-
-      - name: Build
-        run: |
-          cmake --build build -- -j 2
-
-      - name: Python fuzzing (longer)
-        run: |
-          python3 test_differential.py --fuzz --count=2000 --seed=42
-=======
       - name: Python adversarial differential tests
         run: |
           python3 -V
           python3 tests/python/test_differential.py
 
->>>>>>> 5640aea (several changes related to building and testing procedures)
