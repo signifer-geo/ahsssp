@@ -1,0 +1,8 @@
+/media/carlos/miSSD/repos/ahsssp/build/CMakeFiles/ahsssp.dir
+/media/carlos/miSSD/repos/ahsssp/build/CMakeFiles/test.dir
+/media/carlos/miSSD/repos/ahsssp/build/CMakeFiles/edit_cache.dir
+/media/carlos/miSSD/repos/ahsssp/build/CMakeFiles/rebuild_cache.dir
+/media/carlos/miSSD/repos/ahsssp/build/tests/CMakeFiles/ahsssp_header_compiles.dir
+/media/carlos/miSSD/repos/ahsssp/build/tests/CMakeFiles/test.dir
+/media/carlos/miSSD/repos/ahsssp/build/tests/CMakeFiles/edit_cache.dir
+/media/carlos/miSSD/repos/ahsssp/build/tests/CMakeFiles/rebuild_cache.dir
