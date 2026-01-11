@@ -40,6 +40,12 @@ O(m \log^{2/3} n)
 ]
 time in the comparison–addition model for directed graphs with non-negative real weights.
 
+The Duan et al. algorithm achieves 
+O(mlog⁡2/3n)
+O(mlog
+2/3
+n) in the comparison–addition model. This repo implements those ideas; measured performance varies by graph and tuning.
+
 This repository:
 
 * **implements the same algorithmic ideas**
@@ -97,7 +103,7 @@ These are active areas of development.
 
 ## Performance Characteristics
 
-### Asymptotic Complexity
+### Asymptotic Complexity (Theoretical according to the Duan et al. algorithm)
 
 ```
 Time:  O(m log^(2/3) n)  vs  O(m + n log n)  [Dijkstra]
@@ -409,7 +415,7 @@ Contributions welcome! Areas for improvement:
 
 ## License and usage
 
-This code is released under the **MIT License**.
+This code is released under the **Apache 2.0 License**.
 
 The underlying algorithm is from Duan *et al.* (FOCS 2025).
 This repository provides an **independent reference implementation** intended for:
