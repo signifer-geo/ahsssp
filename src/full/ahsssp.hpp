@@ -39,8 +39,9 @@ struct Config {
     // Performance tuning
     size_t num_threads = std::thread::hardware_concurrency();
     bool enable_early_termination = true;
-    double early_term_threshold = 0.99;  // Terminate when 99% certified
-    
+    //double early_term_threshold = 0.99;  // Terminate when 99% certified
+    double early_term_threshold = 2.0;  // disabled during correctness work
+
     // Memory optimization
     bool compress_pivots = false;
     size_t cache_line_size = 64;
@@ -48,7 +49,10 @@ struct Config {
     Config(size_t n, double min_weight = 1.0) {
         k = std::max(size_t(2), static_cast<size_t>(std::pow(std::log2(n), 1.0/3.0)));
         num_levels = std::max(size_t(1), static_cast<size_t>(std::log(n) / std::log(k)));
-        delta = min_weight / 10.0;
+        //delta = min_weight / 10.0;
+        // Correctness guard: allow zero-weight graphs.
+        // If delta == 0, later computations (e.g., dist / delta) will divide by zero.
+        delta = (min_weight <= 0.0) ? 1.0 : (min_weight / 10.0);
     }
 };
 
@@ -76,9 +80,12 @@ struct Vertex {
     PivotId pivot;       // Nearest certified pivot
     VertexId parent;     // For path reconstruction
     bool certified;      // Whether d_exact is valid
-    
-    Vertex() : d_lower(INF), d_upper(INF), d_exact(INF), 
-               level(0), pivot(0), parent(0), certified(false) {}
+    bool processed;
+
+    Vertex() : d_lower(INF), d_upper(INF), d_exact(INF),
+           level(0), pivot(0), parent(0),
+           certified(false), processed(false) {}
+
 };
 
 struct Pivot {
@@ -314,14 +321,14 @@ public:
                       << "time=" << level_time << "s\n";
             
             // Early termination
-            if (config_.enable_early_termination && 
+            /*if (false && config_.enable_early_termination && 
                 certified_fraction() > config_.early_term_threshold) {
                 std::cout << "Early termination: >" 
                           << (config_.early_term_threshold * 100) 
                           << "% certified\n";
                 finish_with_dijkstra();
                 break;
-            }
+            }*/
         }
         
         finalize();
@@ -364,9 +371,9 @@ private:
         // Initialize source
         vertices_[source_].d_lower = 0.0;
         vertices_[source_].d_upper = 0.0;
-        vertices_[source_].d_exact = 0.0;
+        //vertices_[source_].d_exact = 0.0;
         vertices_[source_].level = config_.num_levels;
-        vertices_[source_].certified = true;
+        //vertices_[source_].certified = true;
         
         // Bellman-Ford k-sweep
         std::vector<VertexId> active = {source_};
@@ -396,10 +403,10 @@ private:
         
         // Certify k-hop neighborhood
         for (VertexId v : active) {
-            vertices_[v].d_exact = vertices_[v].d_upper;
+            //vertices_[v].d_exact = vertices_[v].d_upper;
             vertices_[v].level = 0;
-            vertices_[v].certified = true;
-            stats_.num_certified++;
+            //vertices_[v].certified = true;
+            //stats_.num_certified++;
         }
         
         // Build pivot hierarchy
@@ -418,10 +425,16 @@ private:
         auto end = std::chrono::high_resolution_clock::now();
         stats_.time_init = std::chrono::duration<double>(end - start).count();
         
-        std::cout << "Initialization complete: " 
-                  << active.size() << " vertices certified, "
-                  << stats_.num_pivots << " pivots, "
-                  << "time=" << stats_.time_init << "s\n";
+        //std::cout << "Initialization complete: " 
+        //          << active.size() << " vertices certified, "
+        //          << stats_.num_pivots << " pivots, "
+        //          << "time=" << stats_.time_init << "s\n";
+                  
+	std::cout << "Initialization complete: "
+		  << active.size() << " vertices discovered, "
+		  << stats_.num_certified << "/" << n_ << " certified\n";
+                
+                  
     }
     
     void build_pivot_hierarchy() {
@@ -563,7 +576,9 @@ private:
         using PQItem = std::pair<double, VertexId>;
         std::priority_queue<PQItem, std::vector<PQItem>, std::greater<PQItem>> pq;
         
-        pq.emplace(0.0, root);
+        // CRITICAL: Seed with GLOBAL distance, not 0!
+        // This ensures d_u represents global distance from source
+        pq.emplace(vertices_[root].d_upper, root);
         std::unordered_set<VertexId> visited;
         size_t steps = 0;
         
@@ -577,23 +592,21 @@ private:
             visited.insert(u);
             steps++;
             
-            // Certify u
+            // Update discovery metadata (NO certification)
             if (vertices_[u].level < level) {
-                vertices_[u].d_exact = d_u;
                 vertices_[u].level = level;
                 vertices_[u].pivot = pid;
-                vertices_[u].certified = true;
-                stats_.num_certified++;
+                // NO d_exact, NO certified
                 
                 pivots_[pid].distances.emplace_back(u, d_u);
             }
             
-            // Relax edges
+            // Relax edges (d_u is now global distance)
             for (const auto& edge : graph_.out_edges(u)) {
                 VertexId v = edge.target;
                 double d_new = d_u + edge.weight;
                 
-                if (d_new < vertices_[v].d_upper) {
+                if (d_new < vertices_[v].d_upper - 1e-12) {
                     vertices_[v].d_upper = d_new;
                     vertices_[v].parent = u;
                     pq.emplace(d_new, v);
@@ -664,46 +677,68 @@ private:
     }
     
     void finish_with_dijkstra() {
-        using PQItem = std::pair<double, VertexId>;
-        std::priority_queue<PQItem, std::vector<PQItem>, std::greater<PQItem>> pq;
-        
-        // Seed with certified vertices
-        for (VertexId v = 0; v < n_; v++) {
-            if (vertices_[v].certified) {
-                pq.emplace(vertices_[v].d_exact, v);
+        // --- Finalization: multi-source Dijkstra with certify-on-extract ---
+        for (VertexId v = 0; v < n_; ++v) {
+            vertices_[v].processed = false;
+        }
+
+        using Item = std::pair<double, VertexId>;
+        std::priority_queue<Item, std::vector<Item>, std::greater<Item>> pq;
+
+        // Ensure source upper bound is consistent
+        vertices_[source_].d_upper = std::min(vertices_[source_].d_upper, 0.0);
+
+        // Seed with source and any finite upper bounds (good initial labels)
+        pq.emplace(0.0, source_);
+        for (VertexId v = 0; v < n_; ++v) {
+            if (v == source_) continue;
+            if (!std::isinf(vertices_[v].d_upper)) {
+                pq.emplace(vertices_[v].d_upper, v);
             }
         }
-        
+
         while (!pq.empty()) {
             auto [d_u, u] = pq.top();
             pq.pop();
-            
-            // Skip if already certified with better distance
-            if (vertices_[u].certified && vertices_[u].d_exact < d_u) {
-                continue;
-            }
-            
+
+            // stale key
+            if (d_u > vertices_[u].d_upper + 1e-12) continue;
+
+            // settle/relax exactly once per vertex
+            if (vertices_[u].processed) continue;
+
+            // certify ONLY here (first non-stale extract)
             if (!vertices_[u].certified) {
                 vertices_[u].d_exact = d_u;
-                vertices_[u].d_upper = d_u;
                 vertices_[u].certified = true;
                 stats_.num_certified++;
+            } else {
+                // if already certified, it must match
+                // (enable as assert in debug builds)
+                // assert(std::abs(vertices_[u].d_exact - d_u) <= 1e-9);
             }
-            
-            // Relax edges
+
+            vertices_[u].processed = true;
+
+            // Relax outgoing edges from the settled distance d_u
             for (const auto& edge : graph_.out_edges(u)) {
                 VertexId v = edge.target;
                 double d_new = d_u + edge.weight;
-                
-                if (d_new < vertices_[v].d_upper) {
+
+                // certified must never decrease
+                if (vertices_[v].certified) {
+                    // assert(d_new + 1e-12 >= vertices_[v].d_exact);
+                    continue;
+                }
+
+                if (d_new < vertices_[v].d_upper - 1e-12) {
                     vertices_[v].d_upper = d_new;
-                    vertices_[v].parent = u;
                     pq.emplace(d_new, v);
-                    stats_.total_edges_relaxed++;
                 }
             }
         }
     }
+
     
     void finalize() {
         // Check for uncertified vertices
@@ -714,20 +749,12 @@ private:
             }
         }
         
-        if (uncertified > 0) {
+        /*if (uncertified > 0) {
             std::cout << "Finalizing " << uncertified 
                       << " uncertified vertices with Dijkstra\n";
             finish_with_dijkstra();
-        }
-        
-        // Final pass
-        for (VertexId v = 0; v < n_; v++) {
-            if (!vertices_[v].certified) {
-                vertices_[v].d_exact = vertices_[v].d_upper;
-                vertices_[v].certified = true;
-                stats_.num_certified++;
-            }
-        }
+        }*/
+        finish_with_dijkstra();
     }
     
     double certified_fraction() const {
