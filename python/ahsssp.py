@@ -131,9 +131,35 @@ class Graph:
         """Add directed edge from u to v"""
         self.adj[u].append(Edge(v, weight))
     
-    def out_edges(self, u: int) -> List[Edge]:
-        """Get outgoing edges from u"""
-        return self.adj[u]
+    #def out_edges(self, u: int) -> List[Edge]:
+    #    """Get outgoing edges from u"""
+    #    return self.adj[u]
+
+    def out_edges(self, u: int):
+        """
+        Return outgoing edges from u.
+        Supports:
+          - adjacency list stored as self.adj (list of lists)
+          - adjacency dict stored as self.adj (dict[int] -> list)
+          - direct storage as self.edges_out (if present)
+        """
+        if hasattr(self, "edges_out"):
+            return self.edges_out[u]
+
+        if hasattr(self, "adj"):
+            adj = self.adj
+            # dict adjacency
+            if isinstance(adj, dict):
+                return adj.get(u, [])
+            # list adjacency
+            return adj[u]
+
+        # If graph itself is an adjacency list-like object
+        try:
+            return self[u]
+        except Exception:
+            return []
+
     
     def num_vertices(self) -> int:
         return self.n
@@ -175,19 +201,62 @@ class AHSSSPEngine:
         
         print(f"Initialized AH-SSSP: n={self.n}, m={self.m}, k={self.k}, levels={self.num_levels}")
     
+    #def _compute_delta(self) -> float:
+    #    """Compute distance quantum"""
+    #    min_weight = float('inf')
+    #    for u in range(self.n):
+    #        for edge in self.graph.out_edges(u):
+    #            min_weight = min(min_weight, edge.weight)
+    #    return min_weight / 10.0 if min_weight != float('inf') else 1.0
+
     def _compute_delta(self) -> float:
-        """Compute distance quantum"""
-        min_weight = float('inf')
+        min_weight = float("inf")
         for u in range(self.n):
-            for edge in self.graph.out_edges(u):
-                min_weight = min(min_weight, edge.weight)
-        return min_weight / 10.0 if min_weight != float('inf') else 1.0
+            for (v, w) in self._out_edges(u): #self.graph[u]:
+                if w < min_weight:
+                    min_weight = w
+
+        # Guard: allow zero-weight graphs
+        if min_weight <= 0.0 or min_weight == float("inf"):
+            return 1.0
+
+        return min_weight / 10.0
+
+    def _out_edges(self, u):
+        """Yield (v, w) for outgoing edges of u, supporting multiple graph backends."""
+        g = self.graph
+
+        # Preferred: Graph object API
+        if hasattr(g, "out_edges"):
+            for e in g.out_edges(u):
+                # support either tuple edges (v,w) or objects with .to/.weight or .v/.w
+                if isinstance(e, tuple) or isinstance(e, list):
+                    yield e[0], e[1]
+                else:
+                    v = getattr(e, "to", getattr(e, "v", None))
+                    w = getattr(e, "weight", getattr(e, "w", None))
+                    yield v, w
+            return
+
+        # Common fallback: adjacency list stored as .adj
+        if hasattr(g, "adj"):
+            for v, w in g.adj[u]:
+                yield v, w
+            return
+
+        # Last resort: treat g itself as adjacency list
+        for v, w in g[u]:
+            yield v, w
+
     
     def _distance_to_level(self, dist: float) -> int:
         """Map distance to level"""
         if math.isinf(dist):
             return self.num_levels - 1
-        level = int(math.log(max(1.0, dist / self.delta)) / math.log(self.k))
+        #level = int(math.log(max(1.0, dist / self.delta)) / math.log(self.k))
+        delta = self.delta if self.delta > 0.0 else 1.0
+        level = int(math.log(max(1.0, dist / delta)) / math.log(self.k))
+
         return min(level, self.num_levels - 1)
     
     def initialize(self):
@@ -224,9 +293,9 @@ class AHSSSPEngine:
         
         # Certify k-hop neighborhood at level 0
         for v in active:
-            self.vertices[v].d_exact = self.vertices[v].d_upper
+            #self.vertices[v].d_exact = self.vertices[v].d_upper
             self.vertices[v].level = 0
-            self.stats.num_certified += 1
+            #self.stats.num_certified += 1
         
         # Build initial pivot hierarchy
         self._build_pivot_hierarchy()
@@ -330,7 +399,8 @@ class AHSSSPEngine:
         
         # Initialize
         self.initialize()
-        
+        self.stats.num_certified = 0
+
         # Process levels from bottom to top
         for level in range(self.num_levels):
             level_start = time.time()
@@ -341,11 +411,19 @@ class AHSSSPEngine:
             print(f"Level {level}: {self.stats.num_certified}/{self.n} certified, "
                   f"time={level_time:.3f}s")
             
-            # Early termination
-            if self._certified_fraction() > 0.99:
+            ## Early termination
+            #if self._certified_fraction() > 0.99:
+            #    print("Early termination: >99% certified")
+            #    self._finish_with_dijkstra()
+            #    break
+ 
+            # Early termination disabled in correctness-lock phase
+            if False and self._certified_fraction() > 0.99:
                 print("Early termination: >99% certified")
                 self._finish_with_dijkstra()
                 break
+
+ 
         
         self._finalize()
         
@@ -409,10 +487,10 @@ class AHSSSPEngine:
             
             # Certify u if not already certified
             if self.vertices[u].level < level:
-                self.vertices[u].d_exact = d_u
+                #self.vertices[u].d_exact = d_u
                 self.vertices[u].level = level
                 self.vertices[u].pivot = pivot_id
-                self.stats.num_certified += 1
+                #self.stats.num_certified += 1
                 
                 # Cache distance at pivot
                 self.pivots[pivot_id].distances.append((u, d_u))
@@ -500,52 +578,86 @@ class AHSSSPEngine:
         return self.stats.num_certified / self.n
     
     def _finish_with_dijkstra(self):
-        """Fallback to standard Dijkstra for remaining vertices"""
+        """Multi-source Dijkstra - ONLY place where certification happens
+        
+        Invariant: Each vertex processed exactly once
+        - processed = "outgoing edges already relaxed from this vertex's settled distance"
+        - Duplicates in PQ are harmless (skipped via processed set)
+        - Stale entries in PQ are harmless (skipped via distance check)
+        """
         pq = []
         
-        # Seed with certified vertices
+        # Seed with source
+        heapq.heappush(pq, (0.0, self.source))
+        
+        # Seed with all vertices that have finite upper bounds
+        # (these represent discovered paths, so they're valid upper bounds)
+        seed_count = 1
         for v in range(self.n):
-            if self.vertices[v].d_exact is not None:
-                heapq.heappush(pq, (self.vertices[v].d_exact, v))
+            if v != self.source and not math.isinf(self.vertices[v].d_upper):
+                heapq.heappush(pq, (self.vertices[v].d_upper, v))
+                seed_count += 1
+        
+        print(f"Finalization seeded from source + {seed_count-1} vertices with finite d_upper")
+        
+        processed = set()  # Vertices whose outgoing edges have been relaxed
         
         while pq:
             d_u, u = heapq.heappop(pq)
             
-            # Skip if this vertex has been certified with a better distance
-            if self.vertices[u].d_exact is not None and self.vertices[u].d_exact < d_u:
+            # Skip if already processed (edges already relaxed)
+            if u in processed:
                 continue
             
-            # Certify this vertex
+            # Skip if stale (d_upper improved since push)
+            if d_u > self.vertices[u].d_upper + 1e-9:
+                continue
+            
+            # CERTIFY if not yet certified
             if self.vertices[u].d_exact is None:
                 self.vertices[u].d_exact = d_u
                 self.vertices[u].d_upper = d_u
                 self.stats.num_certified += 1
+            
+            # Mark as processed so we don't relax its edges again
+            processed.add(u)
             
             # Relax edges
             for edge in self.graph.out_edges(u):
                 v = edge.target
                 d_new = d_u + edge.weight
                 
-                if d_new < self.vertices[v].d_upper:
+                if d_new < self.vertices[v].d_upper - 1e-9:
                     self.vertices[v].d_upper = d_new
                     self.vertices[v].parent = u
                     heapq.heappush(pq, (d_new, v))
                     self.stats.total_edges_relaxed += 1
-    
-    def _finalize(self):
-        """Ensure all vertices are certified"""
-        # Check if any vertices are still uncertified
-        uncertified = [v for v in range(self.n) if self.vertices[v].d_exact is None]
         
-        if uncertified:
-            print(f"Finalizing {len(uncertified)} uncertified vertices with Dijkstra")
-            self._finish_with_dijkstra()
-        
-        # Final pass: set any remaining
+        # After PQ completes: any vertex still None is unreachable from the source
         for v in range(self.n):
             if self.vertices[v].d_exact is None:
-                self.vertices[v].d_exact = self.vertices[v].d_upper
-                self.stats.num_certified += 1
+                self.vertices[v].d_exact = math.inf
+
+
+    
+    #def _finalize(self):
+    #    """Ensure all vertices are certified"""
+    #    # Check if any vertices are still uncertified
+    #    uncertified = [v for v in range(self.n) if self.vertices[v].d_exact is None]
+    #    
+    #    if uncertified:
+    #        print(f"Finalizing {len(uncertified)} uncertified vertices with Dijkstra")
+    #        self._finish_with_dijkstra()
+    #    
+    #    # Final pass: set any remaining
+    #    for v in range(self.n):
+    #        #if self.vertices[v].d_exact is None:
+    #            #self.vertices[v].d_exact = self.vertices[v].d_upper
+    #            #self.stats.num_certified += 1
+
+    def _finalize(self):
+        self._finish_with_dijkstra()
+
     
     def distance(self, target: int) -> Optional[float]:
         """Get distance to target"""
